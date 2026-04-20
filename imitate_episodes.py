@@ -1,3 +1,5 @@
+# CUDA_VISIBLE_DEVICES=0 python imitate_episodes.py     --task_name ur10_grasp_place     --ckpt_dir /home_local/rudra_1/rudra/data/act_1/act_grasp_place_v1     --policy_class ACT     --kl_weight 10     --chunk_size 100     --hidden_dim 512     --batch_size 256     --dim_feedforward 3200     --num_epochs 40000     --lr 1e-5     --seed 0     --temporal_agg
+
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'detr'))
 import torch
