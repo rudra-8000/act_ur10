@@ -15,9 +15,9 @@ from utils import sample_box_pose, sample_insertion_pose # robot functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
 from policy import ACTPolicy, CNNMLPPolicy
 from visualize_episodes import save_videos
-from constants import SIM_TASK_CONFIGS, TASK_CONFIGS, DT  # now both live in constants.py
+from constants import DATA_DIR, TASK_CONFIGS, DT, STATE_DIM  # now both live in constants.py
 
-from sim_env import BOX_POSE
+# from sim_env import BOX_POSE
 
 import IPython
 e = IPython.embed

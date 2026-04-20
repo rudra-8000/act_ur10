@@ -79,13 +79,13 @@
 # constants.py — UR10 version
 import pathlib
 
-DATA_DIR = '/home/rudra_1/rudra/data'
+DATA_DIR = '/home_local/rudra_1/rudra/data'
 
 TASK_CONFIGS = {
     'ur10_grasp_place': {
         'dataset_dir': DATA_DIR + '/grasp_place_v21_hdf5',
-        'num_episodes': 40,        # you have 40 episodes (000-039)
-        'episode_len': 400,        # set to your actual avg episode length
+        'num_episodes': 40,
+        'episode_len': 762,  # ← set to your actual max from the check above
         'camera_names': ['cam_high', 'cam_right_wrist'],
     },
 }
