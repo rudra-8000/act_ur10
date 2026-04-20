@@ -1,3 +1,5 @@
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'detr'))
 import torch
 import numpy as np
 import os
@@ -64,17 +66,30 @@ def main(args):
         dec_layers = 7
         nheads = 8
         policy_config = {'lr': args['lr'],
-                         'num_queries': args['chunk_size'],
-                         'kl_weight': args['kl_weight'],
-                         'hidden_dim': args['hidden_dim'],
-                         'dim_feedforward': args['dim_feedforward'],
-                         'lr_backbone': lr_backbone,
-                         'backbone': backbone,
-                         'enc_layers': enc_layers,
-                         'dec_layers': dec_layers,
-                         'nheads': nheads,
-                         'camera_names': camera_names,
-                         }
+                 'num_queries': args['chunk_size'],
+                 'kl_weight': args['kl_weight'],
+                 'hidden_dim': args['hidden_dim'],
+                 'dim_feedforward': args['dim_feedforward'],
+                 'lr_backbone': lr_backbone,
+                 'backbone': backbone,
+                 'enc_layers': enc_layers,
+                 'dec_layers': dec_layers,
+                 'nheads': nheads,
+                 'camera_names': camera_names,
+                 'state_dim': state_dim,   # ← ADD THIS LINE
+        }
+        # policy_config = {'lr': args['lr'],
+        #                  'num_queries': args['chunk_size'],
+        #                  'kl_weight': args['kl_weight'],
+        #                  'hidden_dim': args['hidden_dim'],
+        #                  'dim_feedforward': args['dim_feedforward'],
+        #                  'lr_backbone': lr_backbone,
+        #                  'backbone': backbone,
+        #                  'enc_layers': enc_layers,
+        #                  'dec_layers': dec_layers,
+        #                  'nheads': nheads,
+        #                  'camera_names': camera_names,
+        #                  }
     elif policy_class == 'CNNMLP':
         policy_config = {'lr': args['lr'], 'lr_backbone': lr_backbone, 'backbone' : backbone, 'num_queries': 1,
                          'camera_names': camera_names,}
@@ -109,7 +124,13 @@ def main(args):
         print()
         exit()
 
-    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val)
+    train_dataloader, val_dataloader, stats, _ = load_data(
+        dataset_dir, num_episodes, camera_names,
+        batch_size_train, batch_size_val,
+        episode_len  # ← add this argument
+    )
+
+    # train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val)
 
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
@@ -327,7 +348,6 @@ def forward_pass(data, policy):
     image_data, qpos_data, action_data, is_pad = image_data.cuda(), qpos_data.cuda(), action_data.cuda(), is_pad.cuda()
     return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
 
-
 def train_bc(train_dataloader, val_dataloader, config):
     num_epochs = config['num_epochs']
     ckpt_dir = config['ckpt_dir']
@@ -339,15 +359,33 @@ def train_bc(train_dataloader, val_dataloader, config):
 
     policy = make_policy(policy_class, policy_config)
     policy.cuda()
-    optimizer = make_optimizer(policy_class, policy)
+
+    # ── Multi-GPU ──────────────────────────────────────────
+    if torch.cuda.device_count() > 1:
+        tqdm.write(f'Using {torch.cuda.device_count()} GPUs')
+        policy = torch.nn.DataParallel(policy)
+    # ───────────────────────────────────────────────────────
+
+    optimizer = make_optimizer(policy_class, policy.module if isinstance(policy, torch.nn.DataParallel) else policy)
+# def train_bc(train_dataloader, val_dataloader, config):
+#     num_epochs = config['num_epochs']
+#     ckpt_dir = config['ckpt_dir']
+#     seed = config['seed']
+#     policy_class = config['policy_class']
+#     policy_config = config['policy_config']
+
+#     set_seed(seed)
+
+#     policy = make_policy(policy_class, policy_config)
+#     policy.cuda()
+#     optimizer = make_optimizer(policy_class, policy)
 
     train_history = []
     validation_history = []
     min_val_loss = np.inf
     best_ckpt_info = None
     for epoch in tqdm(range(num_epochs)):
-        print(f'\nEpoch {epoch}')
-        # validation
+    # validation
         with torch.inference_mode():
             policy.eval()
             epoch_dicts = []
@@ -356,43 +394,89 @@ def train_bc(train_dataloader, val_dataloader, config):
                 epoch_dicts.append(forward_dict)
             epoch_summary = compute_dict_mean(epoch_dicts)
             validation_history.append(epoch_summary)
+            # epoch_val_loss = epoch_summary['loss']
+            epoch_val_loss = epoch_summary['loss'].mean().item()
 
-            epoch_val_loss = epoch_summary['loss']
             if epoch_val_loss < min_val_loss:
                 min_val_loss = epoch_val_loss
-                best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
-        print(f'Val loss:   {epoch_val_loss:.5f}')
-        summary_string = ''
-        for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
+                # best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
+                raw_sd = policy.module.state_dict() if isinstance(policy, torch.nn.DataParallel) else policy.state_dict()
+                best_ckpt_info = (epoch, min_val_loss, deepcopy(raw_sd))
+
 
         # training
         policy.train()
         optimizer.zero_grad()
         for batch_idx, data in enumerate(train_dataloader):
             forward_dict = forward_pass(data, policy)
-            # backward
             loss = forward_dict['loss']
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
             train_history.append(detach_dict(forward_dict))
-        epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
-        epoch_train_loss = epoch_summary['loss']
-        print(f'Train loss: {epoch_train_loss:.5f}')
-        summary_string = ''
-        for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        print(summary_string)
+        epoch_train_loss = compute_dict_mean(
+            train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])['loss'].mean().item()
+        # epoch_train_loss = compute_dict_mean(
+        #     train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])['loss']
 
-        if epoch % 100 == 0:
+        # ← only print + save every 100 epochs
+        if epoch % 5000 == 0:
+            tqdm.write(f'\nEpoch {epoch} | Val loss: {epoch_val_loss:.5f} | Train loss: {epoch_train_loss:.5f}')
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
-            torch.save(policy.state_dict(), ckpt_path)
+            # torch.save(policy.state_dict(), ckpt_path)
+            raw_sd = policy.module.state_dict() if isinstance(policy, torch.nn.DataParallel) else policy.state_dict()
+            torch.save(raw_sd, ckpt_path)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
+    # for epoch in tqdm(range(num_epochs)):
+    #     tqdm.write(f'\nEpoch {epoch}')
+    #     # validation
+    #     with torch.inference_mode():
+    #         policy.eval()
+    #         epoch_dicts = []
+    #         for batch_idx, data in enumerate(val_dataloader):
+    #             forward_dict = forward_pass(data, policy)
+    #             epoch_dicts.append(forward_dict)
+    #         epoch_summary = compute_dict_mean(epoch_dicts)
+    #         validation_history.append(epoch_summary)
+
+    #         epoch_val_loss = epoch_summary['loss']
+    #         if epoch_val_loss < min_val_loss:
+    #             min_val_loss = epoch_val_loss
+    #             best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
+    #     tqdm.write(f'Val loss:   {epoch_val_loss:.5f}')
+    #     summary_string = ''
+    #     for k, v in epoch_summary.items():
+    #         summary_string += f'{k}: {v.item():.3f} '
+    #     tqdm.write(summary_string)
+
+    #     # training
+    #     policy.train()
+    #     optimizer.zero_grad()
+    #     for batch_idx, data in enumerate(train_dataloader):
+    #         forward_dict = forward_pass(data, policy)
+    #         # backward
+    #         loss = forward_dict['loss']
+    #         loss.backward()
+    #         optimizer.step()
+    #         optimizer.zero_grad()
+    #         train_history.append(detach_dict(forward_dict))
+    #     epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
+    #     epoch_train_loss = epoch_summary['loss']
+    #     tqdm.write(f'Train loss: {epoch_train_loss:.5f}')
+    #     summary_string = ''
+    #     for k, v in epoch_summary.items():
+    #         summary_string += f'{k}: {v.item():.3f} '
+    #     tqdm.write(summary_string)
+
+    #     if epoch % 5000 == 0:
+    #         ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
+    #         torch.save(policy.state_dict(), ckpt_path)
+    #         plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
-    torch.save(policy.state_dict(), ckpt_path)
+    # torch.save(policy.state_dict(), ckpt_path)
+    raw_sd = policy.module.state_dict() if isinstance(policy, torch.nn.DataParallel) else policy.state_dict()
+    torch.save(raw_sd, ckpt_path)
 
     best_epoch, min_val_loss, best_state_dict = best_ckpt_info
     ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')

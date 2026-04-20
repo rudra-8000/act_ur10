@@ -85,7 +85,7 @@ TASK_CONFIGS = {
     'ur10_grasp_place': {
         'dataset_dir': DATA_DIR + '/grasp_place_v21_hdf5',
         'num_episodes': 40,
-        'episode_len': 762,  # ← set to your actual max from the check above
+        'episode_len': 800,  # ← set to your actual max from the check above
         'camera_names': ['cam_high', 'cam_right_wrist'],
     },
 }
