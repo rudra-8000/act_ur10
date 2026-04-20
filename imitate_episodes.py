@@ -8,13 +8,14 @@ from copy import deepcopy
 from tqdm import tqdm
 from einops import rearrange
 
-from constants import DT
-from constants import PUPPET_GRIPPER_JOINT_OPEN
+# from constants import DT
+# from constants import PUPPET_GRIPPER_JOINT_OPEN
 from utils import load_data # data functions
 from utils import sample_box_pose, sample_insertion_pose # robot functions
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
 from policy import ACTPolicy, CNNMLPPolicy
 from visualize_episodes import save_videos
+from constants import SIM_TASK_CONFIGS, TASK_CONFIGS, DT  # now both live in constants.py
 
 from sim_env import BOX_POSE
 
@@ -34,13 +35,20 @@ def main(args):
     num_epochs = args['num_epochs']
 
     # get task parameters
+    # is_sim = task_name[:4] == 'sim_'
+    # if is_sim:
+    #     from constants import SIM_TASK_CONFIGS
+    #     task_config = SIM_TASK_CONFIGS[task_name]
+    # else:
+    #     from aloha_scripts.constants import TASK_CONFIGS
+    #     task_config = TASK_CONFIGS[task_name]
+    
     is_sim = task_name[:4] == 'sim_'
     if is_sim:
-        from constants import SIM_TASK_CONFIGS
         task_config = SIM_TASK_CONFIGS[task_name]
     else:
-        from aloha_scripts.constants import TASK_CONFIGS
-        task_config = TASK_CONFIGS[task_name]
+        task_config = TASK_CONFIGS[task_name]  # already works once TASK_CONFIGS is in constants.py
+    
     dataset_dir = task_config['dataset_dir']
     num_episodes = task_config['num_episodes']
     episode_len = task_config['episode_len']
