@@ -111,7 +111,8 @@ def main(args):
         'seed': args['seed'],
         'temporal_agg': args['temporal_agg'],
         'camera_names': camera_names,
-        'real_robot': not is_sim
+        'real_robot': not is_sim,
+        'resume': args['resume']
     }
 
     if is_eval:
@@ -351,12 +352,48 @@ def forward_pass(data, policy):
     return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
 
 
+# def train_bc(train_dataloader, val_dataloader, config):
+#     num_epochs = config['num_epochs']
+#     ckpt_dir = config['ckpt_dir']
+#     seed = config['seed']
+#     policy_class = config['policy_class']
+#     policy_config = config['policy_config']
+
+#     set_seed(seed)
+
+#     policy = make_policy(policy_class, policy_config)
+#     policy.cuda()
+#     optimizer = make_optimizer(policy_class, policy)
+
+#     train_history = []
+#     validation_history = []
+#     min_val_loss = np.inf
+#     best_ckpt_info = None
+#     for epoch in tqdm(range(num_epochs)):
+import matplotlib
+def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+    matplotlib.use('Agg')
+    for key in train_history[0]:
+        plot_path = os.path.join(ckpt_dir, f'train_val_{key}_seed_{seed}.png')
+        fig = plt.figure()                    # ← capture the figure handle
+        train_values = [summary[key].item() for summary in train_history]
+        val_values = [summary[key].item() for summary in validation_history]
+        plt.plot(np.linspace(0, num_epochs-1, len(train_history)), train_values, label='train')
+        plt.plot(np.linspace(0, num_epochs-1, len(validation_history)), val_values, label='validation')
+        plt.tight_layout()
+        plt.legend()
+        plt.title(key)
+        plt.savefig(plot_path)
+        plt.close(fig)                        # ← explicitly close and free memory
+    print(f'Saved plots to {ckpt_dir}')
+
 def train_bc(train_dataloader, val_dataloader, config):
     num_epochs = config['num_epochs']
     ckpt_dir = config['ckpt_dir']
     seed = config['seed']
     policy_class = config['policy_class']
     policy_config = config['policy_config']
+    resume = config.get('resume', False)
 
     set_seed(seed)
 
@@ -368,7 +405,53 @@ def train_bc(train_dataloader, val_dataloader, config):
     validation_history = []
     min_val_loss = np.inf
     best_ckpt_info = None
-    for epoch in tqdm(range(num_epochs)):
+    start_epoch = 0
+
+    if resume:
+        # Find the latest epoch checkpoint saved every 5000 epochs
+        import glob
+        ckpt_files = glob.glob(os.path.join(ckpt_dir, 'policy_epoch_*_seed_*.ckpt'))
+        
+        # Also check for policy_last.ckpt as a fallback
+        last_ckpt = os.path.join(ckpt_dir, 'policy_last.ckpt')
+        
+        if ckpt_files:
+            # Parse epoch numbers from filenames like policy_epoch_5000_seed_0.ckpt
+            def parse_epoch(path):
+                base = os.path.basename(path)
+                try:
+                    return int(base.split('epoch_')[1].split('_seed_')[0])
+                except:
+                    return -1
+            
+            ckpt_files.sort(key=parse_epoch)
+            latest_ckpt = ckpt_files[-1]
+            start_epoch = parse_epoch(latest_ckpt) + 1
+            
+            print(f'Resuming from {latest_ckpt} (epoch {start_epoch})')
+            policy.load_state_dict(torch.load(latest_ckpt))
+            
+            # Restore histories if they were saved
+            history_path = os.path.join(ckpt_dir, 'training_history.pkl')
+            if os.path.exists(history_path):
+                with open(history_path, 'rb') as f:
+                    saved = pickle.load(f)
+                train_history = saved['train_history']
+                validation_history = saved['validation_history']
+                min_val_loss = saved['min_val_loss']
+                best_ckpt_info = saved.get('best_ckpt_info_meta')  # epoch+loss only, not weights
+                print(f'Restored history: {len(train_history)} train steps, '
+                      f'{len(validation_history)} val epochs, best val loss {min_val_loss:.5f}')
+            else:
+                print('No history file found — loss curves will restart from this epoch.')
+        elif os.path.exists(last_ckpt):
+            print(f'No epoch checkpoints found. Loading policy_last.ckpt as fallback.')
+            print('WARNING: epoch number unknown, starting loop from epoch 0 with loaded weights.')
+            policy.load_state_dict(torch.load(last_ckpt))
+        else:
+            print('WARNING: --resume passed but no checkpoint found. Starting from scratch.')
+
+    for epoch in tqdm(range(start_epoch, num_epochs)):
         if epoch % 100 == 0:
             tqdm.write(f'\nEpoch {epoch}')
         # validation
@@ -404,20 +487,44 @@ def train_bc(train_dataloader, val_dataloader, config):
             optimizer.step()
             optimizer.zero_grad()
             train_history.append(detach_dict(forward_dict))
-        epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
-        epoch_train_loss = epoch_summary['loss']
-        if epoch % 100 == 0:
-            tqdm.write(f'Train loss: {epoch_train_loss:.5f}')
-        summary_string = ''
-        for k, v in epoch_summary.items():
-            summary_string += f'{k}: {v.item():.3f} '
-        if epoch % 100 == 0:
-            tqdm.write(summary_string)
+        
+        max_history = (batch_idx + 1) * 200
+        if len(train_history) > max_history:
+            train_history = train_history[-max_history:]
+        epoch_slice = train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)]
+        if epoch_slice:
+            epoch_summary = compute_dict_mean(epoch_slice)
+            epoch_train_loss = epoch_summary['loss']
+            if epoch % 100 == 0:
+                tqdm.write(f'Train loss: {epoch_train_loss:.5f}')
+            summary_string = ''
+            for k, v in epoch_summary.items():
+                summary_string += f'{k}: {v.item():.3f} '
+            if epoch % 100 == 0:
+                tqdm.write(summary_string)
 
-        if epoch % 100 == 0:
+        # epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
+        # epoch_train_loss = epoch_summary['loss']
+        # if epoch % 100 == 0:
+        #     tqdm.write(f'Train loss: {epoch_train_loss:.5f}')
+        # summary_string = ''
+        # for k, v in epoch_summary.items():
+        #     summary_string += f'{k}: {v.item():.3f} '
+        # if epoch % 100 == 0:
+        #     tqdm.write(summary_string)
+
+        if epoch % 200 == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
-            if epoch % 5000 == 0:
+            if epoch % 1000 == 0:
                 torch.save(policy.state_dict(), ckpt_path)
+            history_path = os.path.join(ckpt_dir, 'training_history.pkl')
+            with open(history_path, 'wb') as f:
+                pickle.dump({
+                    'train_history': train_history,
+                    'validation_history': validation_history,
+                    'min_val_loss': min_val_loss,
+                    'best_ckpt_info_meta': (best_ckpt_info[0], best_ckpt_info[1]) if best_ckpt_info else None,
+                }, f)
             plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
@@ -434,7 +541,7 @@ def train_bc(train_dataloader, val_dataloader, config):
     return best_ckpt_info
 
 
-def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+def plot_history_old(train_history, validation_history, num_epochs, ckpt_dir, seed):
     # save training curves
     for key in train_history[0]:
         plot_path = os.path.join(ckpt_dir, f'train_val_{key}_seed_{seed}.png')
@@ -469,5 +576,6 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
+    parser.add_argument('--resume', action='store_true', help='Resume training from the latest epoch checkpoint in ckpt_dir')
     
     main(vars(parser.parse_args()))
